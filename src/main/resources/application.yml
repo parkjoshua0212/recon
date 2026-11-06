@@ -5,6 +5,10 @@ spring:
     url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:recon}?connectionTimeZone=UTC
     username: ${DB_USERNAME:recon}
     password: ${DB_PASSWORD:recon}
+    hikari:
+      data-source-properties:
+        # Lets the MySQL driver send a JDBC batch as one multi-row INSERT.
+        rewriteBatchedStatements: true
   jpa:
     open-in-view: false
     hibernate:
@@ -17,6 +21,20 @@ spring:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      # Slightly above the file limit to leave room for multipart overhead.
+      max-request-size: 51MB
+
+server:
+  tomcat:
+    # Tomcat must read past the limit so the client receives a 413, not a reset connection.
+    max-swallow-size: 100MB
+
+recon:
+  feed:
+    idempotency-ttl: 24h
 
 management:
   endpoints:
