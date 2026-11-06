@@ -41,3 +41,14 @@ dependencies {
 tasks.named('test') {
     useJUnitPlatform()
 }
+
+// Writes sample feeds and the list of planted breaks to build/samples.
+tasks.register('generateSamples', JavaExec) {
+    group = 'application'
+    description = 'Generates sample CSV feeds with known planted breaks.'
+    // Without this the task uses the default Java on the machine rather than the toolchain.
+    javaLauncher = javaToolchains.launcherFor(java.toolchain)
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.recon.sample.SampleDataGenerator'
+    args layout.buildDirectory.dir('samples').get().asFile.path
+}

@@ -2,7 +2,7 @@
 
 A transaction reconciliation service. It compares an internal ledger with an external statement and reports every mismatch.
 
-Status: Milestone 2 (CSV upload, validation, and Redis idempotency). The full README comes in Milestone 6.
+Status: Milestone 3 (matching engine and reconciliation endpoints). The full README comes in Milestone 6.
 
 ## Requirements
 
@@ -29,6 +29,22 @@ curl "http://localhost:8080/api/feeds/1/errors?page=0&size=50"
 ```
 
 A new file returns 201. Uploading the same file again returns the original feed with 200. Bad rows are saved with a reason, and a bad file returns 400 and stores nothing.
+
+## Run a reconciliation
+
+Upload one ledger feed and one external feed, then compare them using their feed IDs:
+
+```bash
+curl -i -H "Content-Type: application/json" \
+  -d '{"ledgerFeedId": 1, "externalFeedId": 2}' \
+  http://localhost:8080/api/reconciliations
+curl http://localhost:8080/api/reconciliations/1
+curl "http://localhost:8080/api/reconciliations/1/breaks?type=AMOUNT_MISMATCH&page=0&size=50"
+```
+
+Rows are matched by `txn_id`. A transaction can have several breaks, and timestamps are not compared.
+
+To generate larger feeds with known planted breaks, run `./gradlew generateSamples`. The feeds and the list of expected breaks are written to `build/samples`.
 
 ## Test
 
