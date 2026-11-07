@@ -18,6 +18,7 @@ import com.recon.reconciliation.repository.ReconciliationBreakRepository;
 import com.recon.reconciliation.repository.ReconciliationRepository;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -31,7 +32,7 @@ public class ReconciliationService {
     private final ReconciliationRepository reconciliations;
     private final ReconciliationBreakRepository breaks;
     private final MatchRowRepository matchRows;
-    private final MatchingEngine engine;
+    private final ParallelMatchingEngine engine;
     private final ReconciliationWriter writer;
 
     public ReconciliationService(
@@ -39,7 +40,7 @@ public class ReconciliationService {
             ReconciliationRepository reconciliations,
             ReconciliationBreakRepository breaks,
             MatchRowRepository matchRows,
-            MatchingEngine engine,
+            ParallelMatchingEngine engine,
             ReconciliationWriter writer) {
         this.feeds = feeds;
         this.reconciliations = reconciliations;
@@ -60,10 +61,21 @@ public class ReconciliationService {
         Reconciliation run = reconciliations.save(
                 Reconciliation.start(request.ledgerFeedId(), request.externalFeedId()));
         try {
+            long loadStart = System.nanoTime();
             Map<String, List<MatchRow>> ledger = matchRows.loadGroupedByTxnId(request.ledgerFeedId());
             Map<String, List<MatchRow>> external = matchRows.loadGroupedByTxnId(request.externalFeedId());
+            long matchStart = System.nanoTime();
             List<ReconciliationBreak> found = engine.match(ledger, external);
+            long saveStart = System.nanoTime();
             Reconciliation finished = writer.complete(run.getId(), found);
+            long saveEnd = System.nanoTime();
+            log.info(
+                    "Reconciliation {} found {} breaks: load {} ms, match {} ms, save {} ms",
+                    run.getId(),
+                    found.size(),
+                    toMillis(matchStart - loadStart),
+                    toMillis(saveStart - matchStart),
+                    toMillis(saveEnd - saveStart));
             return toSummary(finished);
         } catch (RuntimeException ex) {
             log.error("Reconciliation {} failed", run.getId(), ex);
@@ -91,6 +103,10 @@ public class ReconciliationService {
             total = counts.get(type);
         }
         return PageResponse.of(items.stream().map(BreakResponse::from).toList(), page, size, total);
+    }
+
+    private long toMillis(long nanos) {
+        return TimeUnit.NANOSECONDS.toMillis(nanos);
     }
 
     private ReconciliationSummaryResponse toSummary(Reconciliation run) {

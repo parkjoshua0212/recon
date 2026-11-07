@@ -2,7 +2,7 @@
 
 A transaction reconciliation service. It compares an internal ledger with an external statement and reports every mismatch.
 
-Status: Milestone 3 (matching engine and reconciliation endpoints). The full README comes in Milestone 6.
+Status: Milestone 4 (parallel matching). The full README comes in Milestone 6.
 
 ## Requirements
 
@@ -43,6 +43,8 @@ curl "http://localhost:8080/api/reconciliations/1/breaks?type=AMOUNT_MISMATCH&pa
 ```
 
 Rows are matched by `txn_id`. A transaction can have several breaks, and timestamps are not compared.
+
+Matching runs in parallel. Rows are split into chunks by a hash of `txn_id`, and the result is identical to a single-threaded run. Set `recon.matching.threads` and `recon.matching.chunks` in `application.yml` to change the defaults of 4 threads and 16 chunks.
 
 To generate larger feeds with known planted breaks, run `./gradlew generateSamples`. The feeds and the list of expected breaks are written to `build/samples`.
 

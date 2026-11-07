@@ -35,6 +35,10 @@ server:
 recon:
   feed:
     idempotency-ttl: 24h
+  matching:
+    threads: 4
+    # More chunks than threads, so a thread that finishes early can take more work.
+    chunks: 16
 
 management:
   endpoints:

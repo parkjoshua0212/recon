@@ -2,12 +2,18 @@ package com.recon.reconciliation;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.recon.TestcontainersConfiguration;
 import com.recon.feed.domain.FeedType;
 import com.recon.reconciliation.domain.BreakType;
+import com.recon.reconciliation.domain.ReconciliationBreak;
+import com.recon.reconciliation.repository.MatchRowRepository;
+import com.recon.reconciliation.repository.ReconciliationBreakRepository;
 import com.recon.reconciliation.service.MatchingEngine;
 import com.recon.sample.SampleDataGenerator;
 import com.recon.sample.SampleDataGenerator.ExpectedBreak;
@@ -20,6 +26,7 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.context.annotation.Import;
@@ -46,6 +53,15 @@ class ReconciliationIntegrationTest {
     @Autowired
     private JdbcTemplate jdbc;
 
+    @Autowired
+    private MatchRowRepository matchRows;
+
+    @Autowired
+    private ReconciliationBreakRepository breakRepository;
+
+    @Value("${recon.matching.chunks}")
+    private int chunks;
+
     @MockitoSpyBean
     private MatchingEngine engine;
 
@@ -59,6 +75,32 @@ class ReconciliationIntegrationTest {
         assertThat(summary.get("status").asText()).isEqualTo("COMPLETED");
         List<ExpectedBreak> found = fetchAllBreaks(summary.get("id").asLong());
         assertThat(found).containsExactlyInAnyOrderElementsOf(data.expectedBreaks());
+    }
+
+    /** The stored result of a parallel run, field by field and in order, against the plain engine. */
+    @Test
+    void parallelRunStoresExactlyWhatTheSingleThreadedEngineProduces() {
+        SampleData data = SampleDataGenerator.generate(42L, uniquePrefix(), 3_000, 40);
+        long ledger = uploadFeed("ledger", data.ledgerCsv());
+        long external = uploadFeed("external", data.externalCsv());
+
+        long id = start(ledger, external).getBody().get("id").asLong();
+
+        List<ReconciliationBreak> singleThreaded =
+                new MatchingEngine().match(matchRows.loadGroupedByTxnId(ledger), matchRows.loadGroupedByTxnId(external));
+        assertThat(breakRepository.findPage(id, singleThreaded.size() + 1, 0)).containsExactlyElementsOf(singleThreaded);
+    }
+
+    @Test
+    void reconciliationRunsThroughTheParallelEngine() {
+        SampleData data = SampleDataGenerator.generate(42L, uniquePrefix(), 20, 1);
+        long ledger = uploadFeed("ledger", data.ledgerCsv());
+        long external = uploadFeed("external", data.externalCsv());
+        clearInvocations(engine);
+
+        start(ledger, external);
+
+        verify(engine, times(chunks)).match(any(), any());
     }
 
     @Test
