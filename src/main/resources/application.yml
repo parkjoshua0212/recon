@@ -21,6 +21,9 @@ spring:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
+      # Without these, requests wait up to a minute for Redis during an outage.
+      timeout: 2s
+      connect-timeout: 1s
   servlet:
     multipart:
       max-file-size: 50MB
@@ -39,6 +42,14 @@ recon:
     threads: 4
     # More chunks than threads, so a thread that finishes early can take more work.
     chunks: 16
+  reconciliation:
+    # Must be longer than the slowest run. A 546,000-row run takes about 5 seconds.
+    lock-ttl: 10m
+    summary-cache-ttl: 1h
+
+springdoc:
+  # Only list the error responses each endpoint declares, not every handler on every endpoint.
+  override-with-generic-response: false
 
 management:
   endpoints:

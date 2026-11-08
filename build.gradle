@@ -29,6 +29,7 @@ dependencies {
     implementation 'org.flywaydb:flyway-core'
     implementation 'org.flywaydb:flyway-mysql'
     implementation 'org.apache.commons:commons-csv:1.14.1'
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.17'
     runtimeOnly 'com.mysql:mysql-connector-j'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'

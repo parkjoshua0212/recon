@@ -46,6 +46,17 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         return respond(HttpStatus.NOT_FOUND, ex.getMessage(), request.getRequestURI());
     }
 
+    @ExceptionHandler(ConflictException.class)
+    ResponseEntity<ApiError> handleConflict(ConflictException ex, HttpServletRequest request) {
+        return respond(HttpStatus.CONFLICT, ex.getMessage(), request.getRequestURI());
+    }
+
+    @ExceptionHandler(ServiceUnavailableException.class)
+    ResponseEntity<ApiError> handleUnavailable(ServiceUnavailableException ex, HttpServletRequest request) {
+        log.error("Dependency unavailable on {}", request.getRequestURI(), ex);
+        return respond(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), request.getRequestURI());
+    }
+
     @ExceptionHandler(MultipartException.class)
     ResponseEntity<ApiError> handleBadMultipart(MultipartException ex, HttpServletRequest request) {
         return respond(HttpStatus.BAD_REQUEST, "Malformed multipart request", request.getRequestURI());

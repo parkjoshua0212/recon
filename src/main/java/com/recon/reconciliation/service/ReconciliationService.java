@@ -10,6 +10,7 @@ import com.recon.reconciliation.domain.BreakType;
 import com.recon.reconciliation.domain.MatchRow;
 import com.recon.reconciliation.domain.Reconciliation;
 import com.recon.reconciliation.domain.ReconciliationBreak;
+import com.recon.reconciliation.domain.ReconciliationStatus;
 import com.recon.reconciliation.dto.BreakResponse;
 import com.recon.reconciliation.dto.ReconciliationRequest;
 import com.recon.reconciliation.dto.ReconciliationSummaryResponse;
@@ -34,6 +35,8 @@ public class ReconciliationService {
     private final MatchRowRepository matchRows;
     private final ParallelMatchingEngine engine;
     private final ReconciliationWriter writer;
+    private final ReconciliationLock lock;
+    private final ReconciliationSummaryCache summaryCache;
 
     public ReconciliationService(
             FeedRepository feeds,
@@ -41,23 +44,34 @@ public class ReconciliationService {
             ReconciliationBreakRepository breaks,
             MatchRowRepository matchRows,
             ParallelMatchingEngine engine,
-            ReconciliationWriter writer) {
+            ReconciliationWriter writer,
+            ReconciliationLock lock,
+            ReconciliationSummaryCache summaryCache) {
         this.feeds = feeds;
         this.reconciliations = reconciliations;
         this.breaks = breaks;
         this.matchRows = matchRows;
         this.engine = engine;
         this.writer = writer;
+        this.lock = lock;
+        this.summaryCache = summaryCache;
     }
 
     /**
      * Not @Transactional: the RUNNING row must commit first, so a crash leaves a visible record, and
-     * matching must not hold a database transaction open.
+     * matching must not hold a database transaction open. The feeds are checked before the lock is
+     * taken, so a bad request never holds it.
      */
     public ReconciliationSummaryResponse run(ReconciliationRequest request) {
         requireFeed(request.ledgerFeedId(), FeedType.LEDGER);
         requireFeed(request.externalFeedId(), FeedType.EXTERNAL);
 
+        try (ReconciliationLock.Handle ignored = lock.acquire(request.ledgerFeedId(), request.externalFeedId())) {
+            return execute(request);
+        }
+    }
+
+    private ReconciliationSummaryResponse execute(ReconciliationRequest request) {
         Reconciliation run = reconciliations.save(
                 Reconciliation.start(request.ledgerFeedId(), request.externalFeedId()));
         try {
@@ -85,8 +99,16 @@ public class ReconciliationService {
         }
     }
 
+    /** Cache-aside: try Redis, fall back to MySQL, and store the answer only if it can never change. */
     public ReconciliationSummaryResponse getSummary(long reconciliationId) {
-        return toSummary(requireReconciliation(reconciliationId));
+        return summaryCache.find(reconciliationId).orElseGet(() -> {
+            Reconciliation run = requireReconciliation(reconciliationId);
+            ReconciliationSummaryResponse summary = toSummary(run);
+            if (run.getStatus() == ReconciliationStatus.COMPLETED) {
+                summaryCache.store(summary);
+            }
+            return summary;
+        });
     }
 
     public PageResponse<BreakResponse> getBreaks(long reconciliationId, BreakType type, int page, int size) {

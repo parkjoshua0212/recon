@@ -2,19 +2,26 @@ package com.recon.reconciliation;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.recon.TestcontainersConfiguration;
+import com.recon.common.ServiceUnavailableException;
 import com.recon.feed.domain.FeedType;
 import com.recon.reconciliation.domain.BreakType;
 import com.recon.reconciliation.domain.ReconciliationBreak;
 import com.recon.reconciliation.repository.MatchRowRepository;
 import com.recon.reconciliation.repository.ReconciliationBreakRepository;
+import com.recon.reconciliation.repository.ReconciliationRepository;
 import com.recon.reconciliation.service.MatchingEngine;
+import com.recon.reconciliation.service.ReconciliationLock;
+import com.recon.reconciliation.service.ReconciliationSummaryCache;
 import com.recon.sample.SampleDataGenerator;
 import com.recon.sample.SampleDataGenerator.ExpectedBreak;
 import com.recon.sample.SampleDataGenerator.SampleData;
@@ -23,6 +30,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -31,9 +44,11 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.context.annotation.Import;
 import org.springframework.core.io.ByteArrayResource;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -62,8 +77,17 @@ class ReconciliationIntegrationTest {
     @Value("${recon.matching.chunks}")
     private int chunks;
 
+    @Autowired
+    private StringRedisTemplate redis;
+
     @MockitoSpyBean
     private MatchingEngine engine;
+
+    @MockitoSpyBean
+    private ReconciliationLock lock;
+
+    @MockitoSpyBean
+    private ReconciliationRepository reconciliationRepository;
 
     /** The core guarantee: every planted break is found, and nothing else is reported. */
     @Test
@@ -313,6 +337,235 @@ class ReconciliationIntegrationTest {
             assertErrorFormat(response.getBody(), 400, path);
             assertThat(response.getBody().get("message").asText()).doesNotContain("java.");
         }
+    }
+
+    @Test
+    void secondRunIsRejectedWhileTheFirstIsRunning() throws Exception {
+        SampleData data = SampleDataGenerator.generate(42L, uniquePrefix(), 20, 1);
+        long ledger = uploadFeed("ledger", data.ledgerCsv());
+        long external = uploadFeed("external", data.externalCsv());
+        CountDownLatch matching = new CountDownLatch(1);
+        CountDownLatch finish = new CountDownLatch(1);
+        pauseMatching(matching, finish);
+
+        // finish is released inside the inner try, because closing the executor waits for paused tasks.
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            try {
+                Future<ResponseEntity<JsonNode>> first = executor.submit(() -> start(ledger, external));
+                assertThat(matching.await(30, TimeUnit.SECONDS)).isTrue();
+                long runs = countRuns(ledger);
+
+                ResponseEntity<JsonNode> second = start(ledger, external);
+
+                assertThat(second.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+                assertErrorFormat(second.getBody(), 409, "/api/reconciliations");
+                assertThat(second.getBody().get("message").asText()).contains("already running");
+                assertThat(countRuns(ledger)).isEqualTo(runs);
+
+                // Reading a RUNNING summary must not cache it, or this run would look unfinished forever.
+                long id = jdbc.queryForObject(
+                        "SELECT MAX(id) FROM reconciliation WHERE ledger_feed_id = ?", Long.class, ledger);
+                JsonNode running = rest.getForObject("/api/reconciliations/" + id, JsonNode.class);
+                assertThat(running.get("status").asText()).isEqualTo("RUNNING");
+                assertThat(redis.hasKey(ReconciliationSummaryCache.key(id))).isFalse();
+
+                finish.countDown();
+
+                assertThat(first.get(30, TimeUnit.SECONDS).getStatusCode()).isEqualTo(HttpStatus.CREATED);
+                JsonNode finished = rest.getForObject("/api/reconciliations/" + id, JsonNode.class);
+                assertThat(finished.get("status").asText()).isEqualTo("COMPLETED");
+            } finally {
+                finish.countDown();
+            }
+        }
+    }
+
+    @Test
+    void manySimultaneousRunsProduceOneWinner() throws Exception {
+        SampleData data = SampleDataGenerator.generate(42L, uniquePrefix(), 20, 1);
+        long ledger = uploadFeed("ledger", data.ledgerCsv());
+        long external = uploadFeed("external", data.externalCsv());
+        CountDownLatch matching = new CountDownLatch(1);
+        CountDownLatch finish = new CountDownLatch(1);
+        pauseMatching(matching, finish);
+        int attempts = 8;
+
+        List<HttpStatusCode> statuses = new ArrayList<>();
+        try (ExecutorService executor = Executors.newFixedThreadPool(attempts)) {
+            try {
+                ExecutorCompletionService<ResponseEntity<JsonNode>> runs = new ExecutorCompletionService<>(executor);
+                for (int i = 0; i < attempts; i++) {
+                    runs.submit(() -> start(ledger, external));
+                }
+                // The winner stays paused, so the other seven can only finish by being rejected.
+                for (int i = 0; i < attempts - 1; i++) {
+                    Future<ResponseEntity<JsonNode>> rejected = runs.poll(30, TimeUnit.SECONDS);
+                    assertThat(rejected).as("run %d should have been rejected", i).isNotNull();
+                    statuses.add(rejected.get().getStatusCode());
+                }
+                finish.countDown();
+                statuses.add(runs.poll(30, TimeUnit.SECONDS).get().getStatusCode());
+            } finally {
+                finish.countDown();
+            }
+        }
+
+        assertThat(statuses).containsOnly(HttpStatus.CREATED, HttpStatus.CONFLICT);
+        assertThat(statuses).filteredOn(HttpStatus.CREATED::equals).hasSize(1);
+        assertThat(countRuns(ledger)).isEqualTo(1);
+    }
+
+    @Test
+    void lockCoversOnePairOfFeedsOnly() {
+        SampleData first = SampleDataGenerator.generate(42L, uniquePrefix(), 5, 1);
+        SampleData second = SampleDataGenerator.generate(42L, uniquePrefix(), 5, 1);
+        long ledger = uploadFeed("ledger", first.ledgerCsv());
+        long external = uploadFeed("external", first.externalCsv());
+        long otherExternal = uploadFeed("external", second.externalCsv());
+
+        try (ReconciliationLock.Handle held = lock.acquire(ledger, external)) {
+            assertThat(start(ledger, external).getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+            assertThat(start(ledger, otherExternal).getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        }
+
+        assertThat(start(ledger, external).getStatusCode()).isEqualTo(HttpStatus.CREATED);
+    }
+
+    @Test
+    void lockIsReleasedAfterAFailedRun() {
+        SampleData data = SampleDataGenerator.generate(42L, uniquePrefix(), 5, 1);
+        long ledger = uploadFeed("ledger", data.ledgerCsv());
+        long external = uploadFeed("external", data.externalCsv());
+        doThrow(new IllegalStateException("boom")).when(engine).match(any(), any());
+
+        assertThat(start(ledger, external).getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+
+        assertThat(redis.hasKey(ReconciliationLock.key(ledger, external))).isFalse();
+    }
+
+    @Test
+    void invalidRequestNeverTakesTheLock() {
+        SampleData data = SampleDataGenerator.generate(42L, uniquePrefix(), 2, 0);
+        long ledger = uploadFeed("ledger", data.ledgerCsv());
+        long external = uploadFeed("external", data.externalCsv());
+        clearInvocations(lock);
+
+        start(external, ledger);
+        start(999_999_999L, external);
+
+        verify(lock, never()).acquire(anyLong(), anyLong());
+    }
+
+    @Test
+    void unavailableLockServiceReturns503AndStartsNothing() {
+        SampleData data = SampleDataGenerator.generate(42L, uniquePrefix(), 2, 0);
+        long ledger = uploadFeed("ledger", data.ledgerCsv());
+        long external = uploadFeed("external", data.externalCsv());
+        doThrow(new ServiceUnavailableException("Could not reach the lock service, try again later", null))
+                .when(lock)
+                .acquire(anyLong(), anyLong());
+
+        ResponseEntity<JsonNode> response = start(ledger, external);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertErrorFormat(response.getBody(), 503, "/api/reconciliations");
+        assertThat(countRuns(ledger)).isZero();
+    }
+
+    @Test
+    void completedSummaryIsServedFromTheCacheWithTheSameContent() {
+        long id = reconcile(SampleDataGenerator.generate(42L, uniquePrefix(), 10, 1)).getBody().get("id").asLong();
+        String key = ReconciliationSummaryCache.key(id);
+        assertThat(redis.hasKey(key)).isFalse();
+
+        JsonNode fromDatabase = rest.getForObject("/api/reconciliations/" + id, JsonNode.class);
+        assertThat(redis.hasKey(key)).isTrue();
+        clearInvocations(reconciliationRepository);
+
+        JsonNode fromCache = rest.getForObject("/api/reconciliations/" + id, JsonNode.class);
+
+        assertThat(fromCache).isEqualTo(fromDatabase);
+        verify(reconciliationRepository, never()).findById(any());
+    }
+
+    @Test
+    void cachedSummaryExpires() {
+        long id = reconcile(SampleDataGenerator.generate(42L, uniquePrefix(), 5, 0)).getBody().get("id").asLong();
+
+        rest.getForObject("/api/reconciliations/" + id, JsonNode.class);
+
+        assertThat(redis.getExpire(ReconciliationSummaryCache.key(id))).isPositive();
+    }
+
+    @Test
+    void failedSummaryIsNotCached() {
+        SampleData data = SampleDataGenerator.generate(42L, uniquePrefix(), 5, 1);
+        long ledger = uploadFeed("ledger", data.ledgerCsv());
+        long external = uploadFeed("external", data.externalCsv());
+        doThrow(new IllegalStateException("boom")).when(engine).match(any(), any());
+        start(ledger, external);
+        long id = jdbc.queryForObject(
+                "SELECT MAX(id) FROM reconciliation WHERE ledger_feed_id = ?", Long.class, ledger);
+
+        JsonNode summary = rest.getForObject("/api/reconciliations/" + id, JsonNode.class);
+
+        assertThat(summary.get("status").asText()).isEqualTo("FAILED");
+        assertThat(redis.hasKey(ReconciliationSummaryCache.key(id))).isFalse();
+    }
+
+    @Test
+    void corruptCacheEntryFallsBackToTheDatabaseAndIsReplaced() {
+        long id = reconcile(SampleDataGenerator.generate(42L, uniquePrefix(), 5, 1)).getBody().get("id").asLong();
+        String key = ReconciliationSummaryCache.key(id);
+        redis.opsForValue().set(key, "{not json");
+
+        JsonNode summary = rest.getForObject("/api/reconciliations/" + id, JsonNode.class);
+
+        assertThat(summary.get("status").asText()).isEqualTo("COMPLETED");
+        assertThat(redis.opsForValue().get(key)).startsWith("{\"id\":" + id);
+    }
+
+    @Test
+    void apiDocsListEveryEndpointAndTheFileUpload() {
+        JsonNode docs = rest.getForObject("/v3/api-docs", JsonNode.class);
+
+        assertThat(docs.get("paths").fieldNames()).toIterable().containsExactlyInAnyOrder(
+                "/api/feeds/ledger",
+                "/api/feeds/external",
+                "/api/feeds/{id}",
+                "/api/feeds/{id}/errors",
+                "/api/reconciliations",
+                "/api/reconciliations/{id}",
+                "/api/reconciliations/{id}/breaks");
+        JsonNode upload = docs.at("/paths/~1api~1feeds~1ledger/post");
+        assertThat(upload.at("/requestBody/content/multipart~1form-data/schema/properties/file/format").asText())
+                .isEqualTo("binary");
+        assertThat(upload.get("responses").fieldNames()).toIterable()
+                .containsExactlyInAnyOrder("200", "201", "400", "413");
+        assertThat(docs.at("/paths/~1api~1reconciliations/post/responses").fieldNames()).toIterable()
+                .containsExactlyInAnyOrder("201", "400", "404", "409", "503");
+    }
+
+    @Test
+    void swaggerPageLoads() {
+        ResponseEntity<String> page = rest.getForEntity("/swagger-ui/index.html", String.class);
+
+        assertThat(page.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(page.getBody()).contains("swagger-ui");
+    }
+
+    /** Holds every matching task until {@code finish}, keeping a real run inside the lock. */
+    private void pauseMatching(CountDownLatch matching, CountDownLatch finish) {
+        doAnswer(invocation -> {
+            matching.countDown();
+            finish.await(30, TimeUnit.SECONDS);
+            return invocation.callRealMethod();
+        }).when(engine).match(any(), any());
+    }
+
+    private long countRuns(long ledgerFeedId) {
+        return jdbc.queryForObject(
+                "SELECT COUNT(*) FROM reconciliation WHERE ledger_feed_id = ?", Long.class, ledgerFeedId);
     }
 
     private List<ExpectedBreak> fetchAllBreaks(long id) {

@@ -2,7 +2,7 @@
 
 A transaction reconciliation service. It compares an internal ledger with an external statement and reports every mismatch.
 
-Status: Milestone 4 (parallel matching). The full README comes in Milestone 6.
+Status: Milestone 5 (Redis lock, cached summaries, and Swagger docs). The full README comes in Milestone 6.
 
 ## Requirements
 
@@ -47,6 +47,16 @@ Rows are matched by `txn_id`. A transaction can have several breaks, and timesta
 Matching runs in parallel. Rows are split into chunks by a hash of `txn_id`, and the result is identical to a single-threaded run. Set `recon.matching.threads` and `recon.matching.chunks` in `application.yml` to change the defaults of 4 threads and 16 chunks.
 
 To generate larger feeds with known planted breaks, run `./gradlew generateSamples`. The feeds and the list of expected breaks are written to `build/samples`.
+
+## API docs
+
+With the app running, open http://localhost:8080/swagger-ui.html to browse and try every endpoint.
+
+## Locking and caching
+
+Only one run per pair of feeds can be active at a time. A second run gets 409. The lock is a Redis key set with `SET NX` and a 10-minute TTL, so a crash cannot block a pair of feeds forever. If Redis is unavailable, runs return 503, because there is no other protection against two runs at once.
+
+`GET /api/reconciliations/{id}` caches `COMPLETED` summaries in Redis for 1 hour. A completed run never changes, so no event can make a correct entry wrong, and nothing needs to be invalidated during normal use. `RUNNING` and `FAILED` summaries are not cached. The TTL is a safety net for changes made outside the API, such as a wiped database, and the version in the key lets a new response format start fresh. An endpoint that deletes reconciliations would also need to remove the cached entry.
 
 ## Test
 
