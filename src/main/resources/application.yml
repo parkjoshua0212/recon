@@ -3,8 +3,9 @@ spring:
     name: recon
   datasource:
     url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:recon}?connectionTimeZone=UTC
-    username: ${DB_USERNAME:recon}
-    password: ${DB_PASSWORD:recon}
+    # No defaults on purpose. Set DB_USERNAME and DB_PASSWORD, or use the local profile.
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
     hikari:
       data-source-properties:
         # Lets the MySQL driver send a JDBC batch as one multi-row INSERT.

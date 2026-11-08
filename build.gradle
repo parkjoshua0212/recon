@@ -39,6 +39,11 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
+// bootRun uses the local profile unless another profile is chosen.
+tasks.named('bootRun') {
+    systemProperty 'spring.profiles.default', 'local'
+}
+
 tasks.named('test') {
     useJUnitPlatform()
 }

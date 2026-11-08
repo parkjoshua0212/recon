@@ -1,0 +1,7 @@
+# Settings for running on your own machine against `docker compose up`.
+# These match the throwaway credentials in compose.yaml. Real deployments set
+# DB_USERNAME and DB_PASSWORD instead and never activate this profile.
+spring:
+  datasource:
+    username: recon
+    password: recon
