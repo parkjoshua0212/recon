@@ -214,8 +214,10 @@ public final class SampleDataGenerator {
 
     public static void main(String[] args) throws IOException {
         Path directory = Path.of(args.length > 0 ? args[0] : "build/samples");
+        int cleanRows = args.length > 1 ? Integer.parseInt(args[1]) : 1_000;
+        int plantedPerType = args.length > 2 ? Integer.parseInt(args[2]) : 10;
         Files.createDirectories(directory);
-        SampleData data = generate(42L, "GEN", 1_000, 10);
+        SampleData data = generate(42L, "GEN", cleanRows, plantedPerType);
 
         Files.writeString(directory.resolve("generated-ledger.csv"), data.ledgerCsv());
         Files.writeString(directory.resolve("generated-external.csv"), data.externalCsv());
@@ -227,6 +229,12 @@ public final class SampleDataGenerator {
         }
         Files.writeString(directory.resolve("expected-breaks.csv"), expected.toString());
 
-        System.out.println("Wrote " + data.expectedBreaks().size() + " planted breaks to " + directory.toAbsolutePath());
+        System.out.println("Wrote " + rowCount(data.ledgerCsv()) + " ledger rows, " + rowCount(data.externalCsv())
+                + " external rows and " + data.expectedBreaks().size() + " planted breaks to " + directory.toAbsolutePath());
+    }
+
+    /** Data rows in a rendered CSV, not counting the header line. */
+    private static long rowCount(String csv) {
+        return csv.lines().count() - 1;
     }
 }

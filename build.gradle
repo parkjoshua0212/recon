@@ -49,6 +49,7 @@ tasks.named('test') {
 }
 
 // Writes sample feeds and the list of planted breaks to build/samples.
+// Size is optional: ./gradlew generateSamples -PcleanRows=540000 -PplantedPerType=750
 tasks.register('generateSamples', JavaExec) {
     group = 'application'
     description = 'Generates sample CSV feeds with known planted breaks.'
@@ -56,5 +57,7 @@ tasks.register('generateSamples', JavaExec) {
     javaLauncher = javaToolchains.launcherFor(java.toolchain)
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'com.recon.sample.SampleDataGenerator'
-    args layout.buildDirectory.dir('samples').get().asFile.path
+    args layout.buildDirectory.dir('samples').get().asFile.path,
+            providers.gradleProperty('cleanRows').getOrElse('1000'),
+            providers.gradleProperty('plantedPerType').getOrElse('10')
 }

@@ -1,6 +1,17 @@
 # Recon
 
-Recon is a transaction reconciliation service. It takes an exchange's internal ledger and an external statement, such as one from a bank or custodian, compares them transaction by transaction, and reports every difference as a *break*.
+[![CI](https://github.com/parkjoshua0212/recon/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/parkjoshua0212/recon/actions/workflows/ci.yml)
+
+Recon is a transaction reconciliation service. It takes an exchange's internal ledger and an external statement, such as one from a bank or custodian, compares them transaction by transaction, and reports every difference as a *break*. In short: two systems should agree about the same money, and Recon finds every place where they don't.
+
+> **한국어 요약:** 거래소의 내부 원장과 은행·커스터디언의 외부 명세서를 거래 단위로 대조해, 누락·금액·상태 불일치 등 모든 차이(break)를 찾아 보고하는 Spring Boot 백엔드 서비스입니다. 거래 ID 해시 기반 병렬 매칭, Redis 락을 이용한 중복 실행 방지, Testcontainers로 실제 MySQL·Redis를 띄우는 테스트 169개를 갖추고 있습니다.
+
+**At a glance**
+
+- **169 tests**, run by GitHub Actions on every push against real MySQL and Redis containers (Testcontainers).
+- **Parallel matching:** up to **2.4× faster on the matching step** with 8 threads instead of 1, on 546,000 rows per feed. See [Performance](#performance) for what that does and doesn't include.
+- **Redis lock:** a second run on the same feeds gets `409 Conflict`. The lock is one atomic `SET NX` with a TTL, released only by the run that holds it.
+- **No silent data loss:** every rejected CSV row is stored with a reason and served at `/api/feeds/{id}/errors`.
 
 Built with Java 21, Spring Boot 3.5, MySQL 8, Redis, Flyway, JUnit 5, Testcontainers, Docker Compose and GitHub Actions.
 
@@ -190,7 +201,24 @@ Measured on a MacBook with 546,000 rows per feed, with planted breaks of every t
 | Full run, end to end | about 4.3 s: 86% loading, 9% matching, 6% saving |
 | Summary read, from MySQL then from Redis | about 8 ms then about 3 ms |
 
-Most of a run is spent loading rows from MySQL, so more matching threads help less and less. The next improvement would be loading both feeds at the same time, or streaming them.
+The speedups are for the **matching step only**. The default is 4 threads (1.86×); 2.43× is with 8. Matching is about 9% of a full run, so going from 1 to 8 threads saves about 0.2 s of the 4.3 s end-to-end time. Most of a run is spent loading rows from MySQL, so more matching threads help less and less. The next improvement would be loading both feeds at the same time, or streaming them.
+
+### Reproducing these numbers
+
+```bash
+./gradlew generateSamples -PcleanRows=540000 -PplantedPerType=750
+# Wrote 546008 ledger rows, 546005 external rows and 6012 planted breaks to build/samples
+docker compose up -d --wait
+./gradlew bootRun --args='--recon.matching.threads=1'
+```
+
+Upload `build/samples/generated-ledger.csv` and `build/samples/generated-external.csv`, then start a run as in [Quick start](#quick-start). Each run logs its phase times:
+
+```
+Reconciliation 1 found 6012 breaks: load … ms, match … ms, save … ms
+```
+
+Restart with `threads=4` and `threads=8`, and post the same reconciliation again. The feeds are already in MySQL, so they don't need re-uploading. Run each setting a few times and compare later runs, because the first run after start-up includes JVM warm-up.
 
 ## Testing
 
@@ -206,7 +234,7 @@ Docker must be running, because Testcontainers starts a real MySQL and Redis for
 - **Real Redis outage:** a test stops the Redis container mid-test and checks that runs return 503 quickly while uploads and reads keep working.
 - **Mutation-style checks:** each important guard, such as `NX`, the TTL, the token check and the status filter on the cache, was deliberately broken during development to confirm a test fails.
 
-To generate larger sample feeds with planted breaks, run `./gradlew generateSamples`. The output goes to `build/samples`.
+To generate sample feeds with planted breaks, run `./gradlew generateSamples`. By default it writes 1,000 clean rows plus 10 rounds of planted breaks; `-PcleanRows` and `-PplantedPerType` change the size. The output goes to `build/samples`, together with `expected-breaks.csv`, the list of breaks a run should find.
 
 CI (GitHub Actions) runs the full build and test suite on every push.
 
