@@ -1,8 +1,15 @@
 package com.recon;
 
+import io.swagger.v3.oas.annotations.OpenAPIDefinition;
+import io.swagger.v3.oas.annotations.info.Info;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
+@OpenAPIDefinition(info = @Info(
+        title = "Recon API",
+        version = "1.0",
+        description = "Upload an internal ledger and an external statement as CSV, reconcile them, "
+                + "and page through the breaks."))
 @SpringBootApplication
 public class ReconApplication {
 
