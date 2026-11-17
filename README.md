@@ -115,12 +115,12 @@ flowchart LR
         GEH[GlobalExceptionHandler<br/>one JSON error format]
     end
 
-    subgraph mysql[(MySQL: source of truth)]
+    subgraph mysql["MySQL: source of truth"]
         T1[feed<br/>feed_transaction<br/>feed_row_error]
         T2[reconciliation<br/>reconciliation_break]
     end
 
-    subgraph redis[(Redis: speed and safety only)]
+    subgraph redis["Redis: speed and safety only"]
         K1[upload fingerprints<br/>24h]
         K2[run lock<br/>SET NX, 10m TTL]
         K3[completed summaries<br/>1h]
