@@ -53,6 +53,8 @@ curl "$URL/reconciliations/1/breaks?type=AMOUNT_MISMATCH"
 
 Swagger UI is at http://localhost:8080/swagger-ui.html, and health is at http://localhost:8080/actuator/health.
 
+Or run the whole flow with one command: `./demo.sh` starts MySQL and Redis, starts the app if it isn't running, uploads both sample files, prints the rejected rows, runs a reconciliation and lists the breaks. To use other files, pass them as arguments: `./demo.sh <ledger.csv> <external.csv>`.
+
 ## API
 
 | Method | Path | What it does |
